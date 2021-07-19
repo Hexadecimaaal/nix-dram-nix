@@ -27,6 +27,23 @@
 
 namespace nix {
 
+std::string InstallablesSettings::getDefaultFlake(std::string_view url)
+{
+    std::string res = defaultFlake;
+    if (res == "") {
+        throw UsageError("don't know how to handle installable '%s' without flake URL, because the option 'default-flake' is not set", url);
+    }
+    return res;
+}
+
+InstallablesSettings installablesSettings;
+
+static GlobalConfig::Register rInstallablesSettings(&installablesSettings);
+
+const static std::regex attrPathRegex(
+    R"((?:[a-zA-Z0-9_"-][a-zA-Z0-9_".-]*(?:\^((\*)|([a-z]+(,[a-z]+)*)))?))",
+    std::regex::ECMAScript);
+
 MixFlakeOptions::MixFlakeOptions()
 {
     auto category = "Common flake-related options";
@@ -293,15 +310,29 @@ void completeFlakeRefWithFragment(
     /* Look for flake output attributes that match the
        prefix. */
     try {
+        bool isAttrPath = std::regex_match(prefix.begin(), prefix.end(), attrPathRegex);
         auto hash = prefix.find('#');
+        completionType = ctAttrs;
+
         if (hash == std::string::npos) {
             completeFlakeRef(evalState->store, prefix);
-        } else {
-            completionType = ctAttrs;
+        }
 
-            auto fragment = prefix.substr(hash + 1);
-            auto flakeRefS = std::string(prefix.substr(0, hash));
-            auto flakeRef = parseFlakeRef(expandTilde(flakeRefS), absPath("."));
+        if (isAttrPath || hash != std::string::npos) {
+            auto fragment =
+                isAttrPath
+                ? prefix
+                : prefix.substr(hash + 1);
+
+            auto flakeRefS =
+                isAttrPath
+                ? std::string(installablesSettings.getDefaultFlake(prefix))
+                : std::string(prefix.substr(0, hash));
+
+            // FIXME: do tilde expansion.
+            auto flakeRef = parseFlakeRef(
+                flakeRefS,
+                isAttrPath ? std::optional<std::string>{} : absPath("."));
 
             auto evalCache = openEvalCache(*evalState,
                 std::make_shared<flake::LockedFlake>(lockFlake(*evalState, flakeRef, lockFlags)));
@@ -332,7 +363,13 @@ void completeFlakeRefWithFragment(
                         auto attrPath2 = (*attr)->getAttrPath(attr2);
                         /* Strip the attrpath prefix. */
                         attrPath2.erase(attrPath2.begin(), attrPath2.begin() + attrPathPrefix.size());
-                        completions->add(flakeRefS + "#" + concatStringsSep(".", evalState->symbols.resolve(attrPath2)));
+
+                        std::string resolvedAttrPath2 = concatStringsSep(".", evalState->symbols.resolve(attrPath2));
+
+                        if (isAttrPath)
+                            completions->add(resolvedAttrPath2);
+                        else
+                            completions->add(flakeRefS + "#" + resolvedAttrPath2);
                     }
                 }
             }
@@ -369,7 +406,7 @@ void completeFlakeRef(ref<Store> store, std::string_view prefix)
             if (!hasPrefix(prefix, "flake:") && hasPrefix(from, "flake:")) {
                 std::string from2(from, 6);
                 if (hasPrefix(from2, prefix))
-                    completions->add(from2);
+                    completions->add(from2 + "#");
             } else {
                 if (hasPrefix(from, prefix))
                     completions->add(from);
@@ -425,6 +462,17 @@ ref<eval_cache::EvalCache> openEvalCache(
 
             return aOutputs->value;
         });
+}
+
+static std::tuple<FlakeRef, std::string, ExtendedOutputsSpec> parseOnlyAttrPath(
+    const std::string &s)
+{
+    auto [fragment, outputsSpec] = ExtendedOutputsSpec::parse(s);
+    return {
+        parseFlakeRef(installablesSettings.getDefaultFlake(s), {}),
+        std::string(fragment),
+        outputsSpec
+    };
 }
 
 Installables SourceExprCommand::parseInstallables(
@@ -484,7 +532,13 @@ Installables SourceExprCommand::parseInstallables(
             }
 
             try {
-                auto [flakeRef, fragment] = parseFlakeRefWithFragment(std::string { prefix }, absPath("."));
+                bool isAttrPath = std::regex_match(s, attrPathRegex);
+
+                auto [flakeRef, fragment, outputsSpec] =
+                    isAttrPath
+                    ? parseOnlyAttrPath(s)
+                    : parseFlakeRefWithFragmentAndExtendedOutputsSpec(s, absPath("."));
+
                 result.push_back(make_ref<InstallableFlake>(
                         this,
                         getEvalState(),
