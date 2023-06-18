@@ -62,6 +62,24 @@ const uint32_t maxIdsPerBuild =
 #endif
     ;
 
+struct EnvironmentSetting : public BaseSetting<Strings>
+{
+    std::map<std::string, std::optional<std::string>> oldEnvironment;
+    bool hasInherited = false;
+
+    EnvironmentSetting(Config * options,
+        const Strings & def,
+        const std::string & name,
+        const std::string & description,
+        const StringSet & aliases = {})
+        : BaseSetting<Strings>(def, true, name, description, aliases)
+    {
+        options->addSetting(this);
+    }
+
+    void appendOrSet(Strings newValue, bool append) override;
+};
+
 class Settings : public Config
 {
 
@@ -1444,6 +1462,23 @@ public:
      * derivation, or else returns a null pointer.
      */
     const ExternalBuilder * findExternalDerivationBuilderIfSupported(const Derivation & drv);
+
+    EnvironmentSetting environment{this, {}, "environment",
+        R"(
+          Extra environments variables to use. A list of items, each in the
+          format of:
+
+          - `name=value`: Set environment variable `name` to `value`.
+          - `name`: Inherit environment variable `name` from current
+            environment.
+
+          If the user is trusted (see `trusted-users` option), the daemon will
+          also have these environment variables set.
+
+          This option is useful for, e.g., setting `https_proxy` for
+          fixed-output derivations and substituter downloads in a multi-user
+          Nix installation.
+        )"};
 };
 
 // FIXME: don't use a global variable.
